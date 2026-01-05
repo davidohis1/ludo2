@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 
+    Create this file at: android/app/src/main/res/xml/network_security_config.xml
+    This is required for Android 9+ to allow HTTPS connections to Paystack
+-->
+<network-security-config>
+    <!-- Trust system certificates and user-added certificates -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Allow Paystack domains -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">paystack.co</domain>
+        <domain includeSubdomains="true">checkout.paystack.com</domain>
+        <domain includeSubdomains="true">standard.paystack.co</domain>
+        <domain includeSubdomains="true">api.paystack.co</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+    
+    <!-- Debug configuration (remove in production) -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

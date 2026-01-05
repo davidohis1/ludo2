@@ -1,0 +1,15 @@
+{
+  "rules": {
+    "game_sessions": {
+      "$gameId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (!data.exists() || data.child('hostId').val() == auth.uid || newData.child('playerIds').val().contains(auth.uid))",
+        ".validate": "newData.hasChildren(['roomCode', 'hostId', 'maxPlayers', 'status'])"
+      }
+    },
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

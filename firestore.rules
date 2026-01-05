@@ -1,0 +1,126 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==================== HELPER FUNCTIONS ====================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user is the owner of the resource
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Check if user is one of the players in a game
+    function isGamePlayer(gameData) {
+      return isAuthenticated() && request.auth.uid in gameData.playerIds;
+    }
+    
+    // Validate user data structure
+    function isValidUserData() {
+      return request.resource.data.keys().hasAll(['id', 'email', 'displayName', 'coins', 'rating', 'lives', 'totalMatches', 'wins', 'losses', 'createdAt', 'lastLogin'])
+        && request.resource.data.coins is int
+        && request.resource.data.rating is int
+        && request.resource.data.lives is int
+        && request.resource.data.totalMatches is int
+        && request.resource.data.wins is int
+        && request.resource.data.losses is int;
+    }
+    
+    // ==================== USERS COLLECTION ====================
+    
+    match /users/{userId} {
+      // Anyone can read user profiles (for leaderboard, player info, etc.)
+      allow read: if isAuthenticated();
+      
+      // Only the user can create their own profile
+      allow create: if isOwner(userId) && isValidUserData();
+      
+      // Only the user can update their own profile
+      // Prevent users from directly modifying coins, rating, wins, losses (should be done via transactions)
+      // Allow users to update their own profile
+      // AND allow other users (e.g. game winner) to update coins/rating/stats
+      allow update: if isAuthenticated() 
+        && (
+          isOwner(userId) 
+          || (
+            // Allow updating stats only (coins, rating, wins, losses, totalMatches)
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['coins', 'rating', 'wins', 'losses', 'totalMatches', 'lives'])
+          )
+        );
+      
+      // Only the user can delete their own profile
+      allow delete: if isOwner(userId);
+      
+      // ==================== USER SUBCOLLECTIONS ====================
+      
+      // Transactions subcollection
+      match /transactions/{transactionId} {
+        // Users can read their own transactions
+        allow read: if isOwner(userId);
+        
+        // Only system/server can create transactions (via Admin SDK)
+        // Users cannot create/modify/delete transactions directly
+        allow write: if false;
+      }
+    }
+    
+    // ==================== GAMES COLLECTION ====================
+    
+    match /games/{gameId} {
+      // Anyone authenticated can read games (for browsing available games)
+      allow read: if isAuthenticated();
+      
+      // Any authenticated user can create a game
+      allow create: if isAuthenticated() 
+        && request.resource.data.playerIds[0] == request.auth.uid  // Creator must be first player
+        && request.resource.data.status == 0;  // Must start in 'waiting' status
+      
+      // Allow any player in the game to update it (for moves, turns, etc.)
+      allow update: if isAuthenticated() 
+        && (
+          request.auth.uid in resource.data.playerIds
+          || (
+            // Allow joining logic (keep this secure)
+            resource.data.status == 0
+            && request.resource.data.playerIds.size() <= 4
+            && request.resource.data.playerIds.hasAll(resource.data.playerIds)
+            && request.auth.uid in request.resource.data.playerIds
+          )
+        );
+      
+      // Only the host (first player) can delete a game
+      allow delete: if isAuthenticated() 
+        && request.auth.uid == resource.data.playerIds[0];
+    }
+    
+    // ==================== MATCHMAKING QUEUE ====================
+    
+    match /matchmaking_queue/{tier}/players/{playerId} {
+      // Anyone can read the queue (to see waiting players)
+      allow read: if isAuthenticated();
+      
+      // Users can only add themselves to the queue
+      allow create: if isOwner(playerId) 
+        && request.resource.data.userId == request.auth.uid;
+      
+      // Users can only update their own queue entry
+      allow update: if isOwner(playerId);
+      
+      // Users can only remove themselves from the queue
+      allow delete: if isOwner(playerId);
+    }
+    
+    // ==================== DENY ALL OTHER COLLECTIONS ====================
+    
+    // Deny access to any other collections not explicitly defined
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

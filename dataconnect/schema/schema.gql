@@ -1,0 +1,45 @@
+type User @table {
+  uid: String!
+  displayName: String!
+  createdAt: Timestamp!
+  email: String
+  photoUrl: String
+  lastOnline: Timestamp
+}
+
+type Game @table {
+  gameId: String!
+  gameType: String!
+  status: String!
+  currentTurnPlayerId: String!
+  createdAt: Timestamp!
+  winnerId: UUID
+  endedAt: Timestamp
+}
+
+type PlayerInGame @table(key: ["user", "game"]) {
+  user: User!
+  game: Game!
+  playerColor: String!
+  piecePositions: String!
+  lastMoveAt: Timestamp!
+  isHost: Boolean
+}
+
+type GameMove @table {
+  game: Game!
+  player: User!
+  dieRoll: Int!
+  pieceMovedFrom: String!
+  pieceMovedTo: String!
+  createdAt: Timestamp!
+  capturedPieceId: String
+}
+
+type Friendship @table(key: ["initiator", "recipient"]) {
+  initiator: User!
+  recipient: User!
+  status: String!
+  createdAt: Timestamp!
+  acceptedAt: Timestamp
+}

@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "941459768830",
+    "firebase_url": "https://champ-7b072-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "champ-7b072",
+    "storage_bucket": "champ-7b072.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:941459768830:android:1bb77256e590f17cf4acaf",
+        "android_client_info": {
+          "package_name": "com.example.ludotitan"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "941459768830-rsefk7cbe0jcfok0dkr9rjrk281ov4rv.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCPVq0zew4SKjckNxaJFYP22zZVYvgE_xg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "941459768830-rsefk7cbe0jcfok0dkr9rjrk281ov4rv.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "941459768830-beo3j8rlidoq8iqo036bo19llquff6al.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.ludotitan"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
