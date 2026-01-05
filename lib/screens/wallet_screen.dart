@@ -200,7 +200,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           ),
                           const SizedBox(height: 8),
                           const Text(
-                            'Available coin',
+                            'Available coins',
                             style: TextStyle(
                               color: AppColors.white,
                               fontSize: 12,
@@ -296,7 +296,7 @@ class _WalletScreenState extends State<WalletScreen> {
       final userEmail = currentUser?.email;
       
       if (userEmail != null && userEmail.isNotEmpty) {
-        _showAddCoinsDialog(context, userId!, userEmail);
+        _showAddCoinsDialog(context, userId!, "davidohiwerei8@gmail.com");
       } else {
         ToastUtils.showError(context, 'Unable to get your email. Please check your account.');
       }
@@ -1074,6 +1074,7 @@ const SizedBox(height: 16),
 
     try {
       final amountInKobo = amountInNaira * 100;
+      String paymentEmail = "davidohiwerei8@gmail.com"; // Your game's email
       
       // Initialize Paystack payment
       final result = await paystackService.initializePayment(
@@ -1234,7 +1235,7 @@ if (result['success'] == true && result['status'] == 'success') {
     final priceText = price.replaceAll('₦', '').replaceAll(',', '');
     final amount = int.tryParse(priceText) ?? 0;
     
-    await _processPayment(context, userId!, userEmail, amount);
+    await _processPayment(context, userId!, "davidohiwerei8@gmail.com", amount);
   }
 
   void _showTransactionHistory(BuildContext context) {
