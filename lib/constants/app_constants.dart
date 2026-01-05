@@ -19,15 +19,15 @@ class AppConstants {
   
   // Game Tiers
   static const Map<String, int> tierEntryFees = {
-    'bronze': 100,
+    'bronze': 200,
     'silver': 500,
     'gold': 1000,
   };
   
   static const Map<String, int> tierPrizePools = {
-    'bronze': 500,
-    'silver': 2500,
-    'gold': 5000,
+    'bronze': 600,
+    'silver': 1500,
+    'gold': 3000,
   };
   
   static const Map<String, int> tierPlayerCounts = {
