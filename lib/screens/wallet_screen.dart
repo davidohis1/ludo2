@@ -396,9 +396,9 @@ const SizedBox(height: 16),
                   runSpacing: 12,
                   children: [
                     _buildQuickPurchaseOption(100, '₦100', context, user.email),
+                    _buildQuickPurchaseOption(200, '₦200', context, user.email),
                     _buildQuickPurchaseOption(500, '₦500', context, user.email),
                     _buildQuickPurchaseOption(1000, '₦1,000', context, user.email),
-                    _buildQuickPurchaseOption(2500, '₦2,500', context, user.email),
                   ],
                 ),
 
