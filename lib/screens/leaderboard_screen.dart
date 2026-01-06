@@ -24,18 +24,15 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
   int _minutesRemaining = 0;
   int _secondsRemaining = 0;
 
-  // Weekly leaderboard from games
-  List<Map<String, dynamic>> _weeklyGameLeaderboard = [];
-  bool _isLoadingWeeklyGames = false;
-  
-  // Add this: Store all users for leaderboard
-  List<UserModel> _allUsers = [];
+  // Leaderboard data
+  List<Map<String, dynamic>> _leaderboardData = [];
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
     _startTimers();
-    _loadAllUsers(); // Changed from _loadLeaderboard()
+    _loadLeaderboardData();
   }
 
   @override
@@ -54,100 +51,67 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
     });
   }
 
-  // NEW METHOD: Load all users from Firestore
-  // NEW METHOD: Load all users from Firestore
-Future<void> _loadAllUsers() async {
-  try {
-    final firestore = FirebaseFirestore.instance;
-    
-    // Fetch ALL users ordered by winningCoins (descending)
-    final usersSnapshot = await firestore
-        .collection('users')
-        .orderBy('winningCoins', descending: true)
-        .get();
-    
-    final List<UserModel> allUsers = [];
-    
-    for (var doc in usersSnapshot.docs) {
-      final data = doc.data() as Map<String, dynamic>; // Get data as Map
-      allUsers.add(UserModel.fromFirestore(data, doc.id)); // Pass data first, then ID
-    }
-    
-    if (mounted) {
-      setState(() {
-        _allUsers = allUsers;
-      });
-      
-      // Also load weekly data if needed
-      if (_isWeekly) {
-        _calculateWeeklyGameLeaderboard(allUsers);
-      }
-    }
-  } catch (e) {
-    print('Error loading all users: $e');
-  }
-}
-
-  // Get weekly game winnings by checking completed games from this week
-  Future<void> _calculateWeeklyGameLeaderboard(List<UserModel> allUsers) async {
-    if (_isLoadingWeeklyGames || allUsers.isEmpty) return;
+  // Load all users and calculate their winning coins
+  Future<void> _loadLeaderboardData() async {
+    if (_isLoading) return;
     
     setState(() {
-      _isLoadingWeeklyGames = true;
+      _isLoading = true;
     });
 
     try {
-      final weeklyData = <Map<String, dynamic>>[];
       final firestore = FirebaseFirestore.instance;
-      final now = DateTime.now();
-      final startOfWeek = _getStartOfWeek(now);
-      final startOfWeekTimestamp = Timestamp.fromDate(startOfWeek);
-
-      for (var user in allUsers) {
-        int weeklyWinnings = 0;
-        
+      
+      // Get all users from Firestore
+      final usersSnapshot = await firestore.collection('users').get();
+      
+      final leaderboardData = <Map<String, dynamic>>[];
+      
+      for (var doc in usersSnapshot.docs) {
         try {
-          // Get user's transactions from this week
-          final transactionsSnapshot = await firestore
-              .collection('users')
-              .doc(user.id)
-              .collection('transactions')
-              .where('timestamp', isGreaterThanOrEqualTo: startOfWeekTimestamp)
-              .get();
+          final userData = doc.data();
           
-          for (var doc in transactionsSnapshot.docs) {
-            final transaction = doc.data();
-            final type = transaction['type'] as String? ?? '';
-            final amount = transaction['amount'] as int? ?? 0;
-            
-            if (type == 'win' && amount > 0) {
-              weeklyWinnings += amount;
-            }
-          }
+          // Create a UserModel - handle missing winningCoins field
+          final user = UserModel(
+            id: doc.id,
+            displayName: userData['displayName'] ?? 'Unknown',
+            email: userData['email'] ?? '',
+            photoUrl: userData['photoUrl'],
+            rating: userData['rating'] ?? 1000,
+            totalCoins: userData['totalCoins'] ?? 0,
+            depositCoins: userData['depositCoins'] ?? 0,
+            winningCoins: userData['winningCoins'] ?? 0,
+            lives: userData['lives'] ?? 3,
+            lastLogin: (userData['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+            createdAt: (userData['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+          );
+          
+          leaderboardData.add({
+            'user': user,
+            'score': user.winningCoins, // Use winningCoins for ranking
+          });
         } catch (e) {
-          print('Error calculating weekly for user ${user.id}: $e');
+          print('Error processing user ${doc.id}: $e');
+          // Skip this user if there's an error
         }
-        
-        weeklyData.add({
-          'user': user,
-          'weeklyWinnings': weeklyWinnings,
-        });
       }
       
-      // Sort by weekly winnings (highest first)
-      weeklyData.sort((a, b) => (b['weeklyWinnings'] as int).compareTo(a['weeklyWinnings'] as int));
+      // Sort by winning coins (highest first)
+      leaderboardData.sort((a, b) => 
+        (b['score'] as int).compareTo(a['score'] as int)
+      );
       
       if (mounted) {
         setState(() {
-          _weeklyGameLeaderboard = weeklyData;
-          _isLoadingWeeklyGames = false;
+          _leaderboardData = leaderboardData;
+          _isLoading = false;
         });
       }
     } catch (e) {
-      print('Error in weekly calculation: $e');
+      print('Error loading leaderboard: $e');
       if (mounted) {
         setState(() {
-          _isLoadingWeeklyGames = false;
+          _isLoading = false;
         });
       }
     }
@@ -208,9 +172,6 @@ Future<void> _loadAllUsers() async {
                 setState(() {
                   _isWeekly = !_isWeekly;
                 });
-                if (_isWeekly && _weeklyGameLeaderboard.isEmpty) {
-                  _calculateWeeklyGameLeaderboard(_allUsers);
-                }
               },
               child: Text(
                 _isWeekly ? 'Weekly' : 'All Time',
@@ -225,79 +186,44 @@ Future<void> _loadAllUsers() async {
       ),
       body: BlocBuilder<UserCubit, UserState>(
         builder: (context, userState) {
-          final currentUser = userState is UserLoaded ? userState.currentUser : null;
-          
-          if (_allUsers.isEmpty) {
+          if (userState is! UserLoaded) {
+            return const Center(
+              child: CircularProgressIndicator(color: AppColors.primaryRed),
+            );
+          }
+
+          final currentUser = userState.currentUser;
+
+          if (_isLoading) {
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const CircularProgressIndicator(color: AppColors.primaryRed),
-                  const SizedBox(height: 16),
-                  const Text(
+                children: const [
+                  CircularProgressIndicator(color: AppColors.primaryRed),
+                  SizedBox(height: 16),
+                  Text(
                     'Loading leaderboard...',
                     style: TextStyle(color: AppColors.white),
                   ),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: _loadAllUsers,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Retry'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.primaryRed,
-                    ),
-                  ),
                 ],
               ),
             );
           }
 
-          if (_isWeekly && _isLoadingWeeklyGames) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const CircularProgressIndicator(color: AppColors.primaryRed),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Calculating weekly game earnings...',
-                    style: TextStyle(color: AppColors.white),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          List<Map<String, dynamic>> leaderboardData;
-          
-          if (_isWeekly) {
-            leaderboardData = _weeklyGameLeaderboard;
-          } else {
-            // All-time: sort by winningCoins (already sorted from Firestore query)
-            leaderboardData = _allUsers
-                .map((user) => ({
-                      'user': user,
-                      'score': user.winningCoins,
-                    }))
-                .toList();
-          }
-
-          if (leaderboardData.isEmpty) {
+          if (_leaderboardData.isEmpty) {
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const Icon(Icons.leaderboard, size: 64, color: Colors.grey),
                   const SizedBox(height: 16),
-                  Text(
-                    _isWeekly 
-                      ? 'No game winnings this week yet'
-                      : 'No users found',
-                    style: const TextStyle(color: AppColors.white, fontSize: 18),
+                  const Text(
+                    'No leaderboard data yet',
+                    style: TextStyle(color: AppColors.white, fontSize: 18),
                   ),
                   const SizedBox(height: 24),
                   ElevatedButton.icon(
-                    onPressed: _loadAllUsers,
+                    onPressed: _loadLeaderboardData,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Refresh'),
                     style: ElevatedButton.styleFrom(
@@ -310,21 +236,14 @@ Future<void> _loadAllUsers() async {
           }
 
           // Find current user's position
-          int currentUserRank = leaderboardData.indexWhere(
-            (entry) => (entry['user'] as UserModel).id == currentUserId,
+          int currentUserRank = _leaderboardData.indexWhere(
+            (entry) => (entry['user'] as UserModel).id == currentUser.id,
           );
 
           return RefreshIndicator(
             color: AppColors.primaryRed,
             onRefresh: () async {
-              if (_isWeekly) {
-                setState(() {
-                  _weeklyGameLeaderboard = [];
-                });
-                await _calculateWeeklyGameLeaderboard(_allUsers);
-              } else {
-                await _loadAllUsers();
-              }
+              await _loadLeaderboardData();
             },
             child: SingleChildScrollView(
               child: Column(
@@ -361,8 +280,8 @@ Future<void> _loadAllUsers() async {
                         const SizedBox(height: 8),
                         Text(
                           _isWeekly 
-                            ? 'Ranked by total coins won from games this week'
-                            : 'Ranked by total withdrawable coins',
+                            ? 'Ranked by total coins won from games'
+                            : 'Ranked by all-time winning coins',
                           style: const TextStyle(
                             color: AppColors.textSecondary,
                             fontSize: 12,
@@ -400,8 +319,8 @@ Future<void> _loadAllUsers() async {
 
                   const SizedBox(height: 24),
 
-                  // Top 3 Podium - Only show if we have at least 3 users
-                  if (leaderboardData.length >= 3) ...[
+                  // Top 3 Podium
+                  if (_leaderboardData.length >= 3) ...[
                     SizedBox(
                       height: 280,
                       child: Row(
@@ -410,46 +329,38 @@ Future<void> _loadAllUsers() async {
                         children: [
                           // 2nd Place
                           _buildPodiumItem(
-                            leaderboardData[1]['user'] as UserModel,
+                            _leaderboardData[1]['user'] as UserModel,
                             2,
                             AppColors.grey,
                             140,
-                            score: _isWeekly 
-                              ? leaderboardData[1]['weeklyWinnings'] as int
-                              : leaderboardData[1]['score'] as int,
-                            isWeekly: _isWeekly,
+                            score: _leaderboardData[1]['score'] as int,
                           ),
                           const SizedBox(width: 16),
                           // 1st Place
                           _buildPodiumItem(
-                            leaderboardData[0]['user'] as UserModel,
+                            _leaderboardData[0]['user'] as UserModel,
                             1,
                             const Color(0xFFFFD700),
                             180,
-                            score: _isWeekly 
-                              ? leaderboardData[0]['weeklyWinnings'] as int
-                              : leaderboardData[0]['score'] as int,
-                            isWeekly: _isWeekly,
+                            score: _leaderboardData[0]['score'] as int,
                           ),
                           const SizedBox(width: 16),
                           // 3rd Place
                           _buildPodiumItem(
-                            leaderboardData[2]['user'] as UserModel,
+                            _leaderboardData[2]['user'] as UserModel,
                             3,
                             const Color(0xFFCD7F32),
                             120,
-                            score: _isWeekly 
-                              ? leaderboardData[2]['weeklyWinnings'] as int
-                              : leaderboardData[2]['score'] as int,
-                            isWeekly: _isWeekly,
+                            score: _leaderboardData[2]['score'] as int,
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: 16),
                   ],
 
-                  // Leaderboard List - Show all users
+                  const SizedBox(height: 16),
+
+                  // Leaderboard List
                   ListView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
@@ -458,79 +369,69 @@ Future<void> _loadAllUsers() async {
                       right: 20,
                       bottom: 20,
                     ),
-                    itemCount: leaderboardData.length,
+                    itemCount: _leaderboardData.length > 3
+                        ? _leaderboardData.length - 3
+                        : 0,
                     itemBuilder: (context, index) {
-                      // Skip top 3 in the list if they were shown in podium
-                      if (index < 3 && leaderboardData.length >= 3) {
-                        return const SizedBox.shrink();
-                      }
-                      
-                      final user = leaderboardData[index]['user'] as UserModel;
-                      final score = _isWeekly 
-                          ? leaderboardData[index]['weeklyWinnings'] as int
-                          : leaderboardData[index]['score'] as int;
+                      final actualIndex = index + 3;
+                      final user = _leaderboardData[actualIndex]['user'] as UserModel;
+                      final score = _leaderboardData[actualIndex]['score'] as int;
                       final isCurrentUser = user.id == currentUserId;
 
                       return _buildLeaderboardItem(
-                        rank: index + 1,
+                        rank: actualIndex + 1,
                         user: user,
                         score: score,
                         isCurrentUser: isCurrentUser,
-                        isWeekly: _isWeekly,
                       );
                     },
                   ),
 
-                  // Show current user position if they're not in top 3
-                  if (currentUser != null && currentUserRank >= 3) ...[
-                    Container(
-                      margin: const EdgeInsets.only(
-                        left: 20,
-                        right: 20,
-                        bottom: 20,
-                      ),
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            AppColors.primaryRed.withOpacity(0.3),
-                            AppColors.primaryRed.withOpacity(0.1),
+                  // Current User Position
+                  Container(
+                    margin: const EdgeInsets.only(
+                      left: 20,
+                      right: 20,
+                      bottom: 20,
+                    ),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppColors.primaryRed.withOpacity(0.3),
+                          AppColors.primaryRed.withOpacity(0.1),
                         ],
-                        ),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: AppColors.primaryRed,
-                          width: 2,
-                        ),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _isWeekly ? 'Your Weekly Rank' : 'Your Overall Rank',
-                            style: const TextStyle(
-                              color: AppColors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          _buildLeaderboardItem(
-                            rank: currentUserRank + 1,
-                            user: currentUser,
-                            score: _isWeekly 
-                                ? (currentUserRank < _weeklyGameLeaderboard.length 
-                                    ? _weeklyGameLeaderboard[currentUserRank]['weeklyWinnings'] as int
-                                    : 0)
-                                : currentUser.winningCoins,
-                            isCurrentUser: true,
-                            showBorder: false,
-                            isWeekly: _isWeekly,
-                          ),
-                        ],
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AppColors.primaryRed,
+                        width: 2,
                       ),
                     ),
-                  ],
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _isWeekly ? 'Your Weekly Rank' : 'Your Overall Rank',
+                          style: const TextStyle(
+                            color: AppColors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _buildLeaderboardItem(
+                          rank: currentUserRank == -1 
+                              ? _leaderboardData.length + 1 
+                              : currentUserRank + 1,
+                          user: currentUser,
+                          score: currentUser.winningCoins,
+                          isCurrentUser: true,
+                          showBorder: false,
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -546,7 +447,6 @@ Future<void> _loadAllUsers() async {
     Color medalColor,
     double height, {
     required int score,
-    required bool isWeekly,
   }) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -658,7 +558,7 @@ Future<void> _loadAllUsers() async {
               ),
               const SizedBox(height: 4),
               Text(
-                isWeekly ? 'Weekly Wins' : 'Withdrawable',
+                'Winning Coins',
                 style: TextStyle(
                   color: Colors.white.withOpacity(0.7),
                   fontSize: 9,
@@ -677,7 +577,6 @@ Future<void> _loadAllUsers() async {
     required int score,
     required bool isCurrentUser,
     bool showBorder = true,
-    required bool isWeekly,
   }) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -787,8 +686,8 @@ Future<void> _loadAllUsers() async {
               ),
               const SizedBox(height: 2),
               Text(
-                isWeekly ? 'Weekly Wins' : 'Withdrawable',
-                style: TextStyle(
+                'Winning Coins',
+                style: const TextStyle(
                   color: AppColors.textSecondary,
                   fontSize: 10,
                 ),
