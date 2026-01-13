@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '/constants/colors.dart';
 import '/cubits/user/user_cubit.dart';
 import '/services/database_service.dart';
@@ -14,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:async';
 
 class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key});
@@ -29,8 +31,8 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _isProcessing = false;
   double _withdrawableBalance = 0.0;
   bool _hasPendingWithdrawal = false;
+  Timer? _pendingPaymentTimer;
   
-  // FIX 1: Add this line here at class level
   late Future<List<Map<String, dynamic>>> _transactionsFuture;
 
   @override
@@ -38,13 +40,20 @@ class _WalletScreenState extends State<WalletScreen> {
     super.initState();
     _checkPendingWithdrawals();
     
-    // FIX 2: Initialize here
     if (userId != null) {
       _transactionsFuture = databaseService.getUserTransactionsOnce(userId!);
+      // Start checking for pending payments
+      _checkPendingPayments();
+      _startPendingPaymentChecker();
     }
   }
 
-  // FIX 3: Add this method here at class level
+  @override
+  void dispose() {
+    _pendingPaymentTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _refreshTransactions() async {
     if (userId == null) return;
     
@@ -52,6 +61,124 @@ class _WalletScreenState extends State<WalletScreen> {
       setState(() {
         _transactionsFuture = databaseService.getUserTransactionsOnce(userId!);
       });
+    }
+  }
+
+  // Check for pending payments every 30 seconds
+  void _startPendingPaymentChecker() {
+    _pendingPaymentTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      _checkPendingPayments();
+    });
+  }
+
+  // Check for pending payments in SharedPreferences
+  Future<void> _checkPendingPayments() async {
+    if (userId == null) return;
+    
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final pendingPaymentsJson = prefs.getString('pending_payments_$userId');
+      
+      if (pendingPaymentsJson == null) return;
+      
+      final List<dynamic> pendingPayments = json.decode(pendingPaymentsJson);
+      
+      if (pendingPayments.isEmpty) return;
+      
+      // Check each pending payment
+      final List<Map<String, dynamic>> stillPending = [];
+      
+      for (var payment in pendingPayments) {
+        final reference = payment['reference'] as String;
+        final amountInNaira = payment['amount'] as int;
+        final timestamp = DateTime.parse(payment['timestamp'] as String);
+        
+        // Only check payments less than 24 hours old
+        if (DateTime.now().difference(timestamp).inHours < 24) {
+          final result = await paystackService.verifyTransaction(reference);
+          
+          if (result['success'] == true && result['status'] == 'success') {
+            // Payment successful! Credit the user
+            await _creditUserForPendingPayment(reference, amountInNaira);
+            // Don't add to stillPending - payment is complete
+          } else if (result['status'] == 'pending') {
+            // Still pending, keep checking
+            stillPending.add(payment);
+          }
+          // If failed or abandoned, don't add to stillPending - remove it
+        }
+      }
+      
+      // Update pending payments list
+      await prefs.setString('pending_payments_$userId', json.encode(stillPending));
+      
+    } catch (e) {
+      print('Error checking pending payments: $e');
+    }
+  }
+
+  // Credit user for a successful pending payment
+  Future<void> _creditUserForPendingPayment(String reference, int amountInNaira) async {
+    if (userId == null) return;
+    
+    try {
+      final coins = amountInNaira;
+      
+      // Update coins in Firebase
+      await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId!)
+        .update({
+          'totalCoins': FieldValue.increment(coins),
+          'depositCoins': FieldValue.increment(coins),
+        });
+      
+      // Add transaction
+      await databaseService.addTransaction(
+        userId: userId!,
+        type: 'purchase',
+        amount: coins,
+        description: 'Coin purchase (Bank Transfer) - Ref: ${reference.substring(0, 8)}...',
+      );
+      
+      // Refresh user data
+      if (mounted) {
+        final userCubit = context.read<UserCubit>();
+        userCubit.refreshUserData();
+        
+        // Refresh transactions
+        _refreshTransactions();
+        
+        ToastUtils.showSuccess(context, 'Payment verified! $coins coins added to your account.');
+      }
+    } catch (e) {
+      print('Error crediting pending payment: $e');
+    }
+  }
+
+  // Save pending payment to SharedPreferences
+  Future<void> _savePendingPayment(String reference, int amountInNaira) async {
+    if (userId == null) return;
+    
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final pendingPaymentsJson = prefs.getString('pending_payments_$userId');
+      
+      List<Map<String, dynamic>> pendingPayments = [];
+      if (pendingPaymentsJson != null) {
+        pendingPayments = List<Map<String, dynamic>>.from(json.decode(pendingPaymentsJson));
+      }
+      
+      // Add new pending payment
+      pendingPayments.add({
+        'reference': reference,
+        'amount': amountInNaira,
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      
+      await prefs.setString('pending_payments_$userId', json.encode(pendingPayments));
+    } catch (e) {
+      print('Error saving pending payment: $e');
     }
   }
 
@@ -78,32 +205,30 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   Future<void> _loadWithdrawableBalance() async {
-  if (userId == null) return;
-  
-  try {
-    // First migrate user if needed
-    await databaseService.migrateUserBalance(userId!);
+    if (userId == null) return;
     
-    // Get user document
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(userId!)
-        .get();
-    
-    if (userDoc.exists) {
-      final data = userDoc.data()!;
-      final winningCoins = (data['winningCoins'] ?? 0).toDouble();
+    try {
+      await databaseService.migrateUserBalance(userId!);
       
-      if (mounted) {
-        setState(() {
-          _withdrawableBalance = winningCoins;
-        });
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId!)
+          .get();
+      
+      if (userDoc.exists) {
+        final data = userDoc.data()!;
+        final winningCoins = (data['winningCoins'] ?? 0).toDouble();
+        
+        if (mounted) {
+          setState(() {
+            _withdrawableBalance = winningCoins;
+          });
+        }
       }
+    } catch (e) {
+      print('Error loading withdrawable balance: $e');
     }
-  } catch (e) {
-    print('Error loading withdrawable balance: $e');
   }
-}
 
   @override
   Widget build(BuildContext context) {
@@ -135,7 +260,6 @@ class _WalletScreenState extends State<WalletScreen> {
             return const Center(child: CircularProgressIndicator());
           }
 
-          // Load withdrawable balance when user data is available
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _loadWithdrawableBalance();
           });
@@ -289,44 +413,43 @@ class _WalletScreenState extends State<WalletScreen> {
                 Row(
                   children: [
                     Expanded(
-  child: ElevatedButton(
-    onPressed: _isProcessing ? null : () {
-      // Get email directly from Firebase Auth (always available for logged in users)
-      final currentUser = FirebaseAuth.instance.currentUser;
-      final userEmail = currentUser?.email;
-      
-      if (userEmail != null && userEmail.isNotEmpty) {
-        _showAddCoinsDialog(context, userId!, "davidohiwerei8@gmail.com");
-      } else {
-        ToastUtils.showError(context, 'Unable to get your email. Please check your account.');
-      }
-    },
-    style: ElevatedButton.styleFrom(
-      backgroundColor: AppColors.primaryRed,
-      foregroundColor: AppColors.white,
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
-    ),
-    child: _isProcessing
-        ? const SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: Colors.white,
-            ),
-          )
-        : const Text(
-            'Add Coins',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-  ),
-),
+                      child: ElevatedButton(
+                        onPressed: _isProcessing ? null : () {
+                          final currentUser = FirebaseAuth.instance.currentUser;
+                          final userEmail = currentUser?.email;
+                          
+                          if (userEmail != null && userEmail.isNotEmpty) {
+                            _showAddCoinsDialog(context, userId!, userEmail);
+                          } else {
+                            ToastUtils.showError(context, 'Unable to get your email. Please check your account.');
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primaryRed,
+                          foregroundColor: AppColors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: _isProcessing
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text(
+                                'Add Coins',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                      ),
+                    ),
                     const SizedBox(width: 16),
                     Expanded(
                       child: ElevatedButton(
@@ -375,13 +498,6 @@ class _WalletScreenState extends State<WalletScreen> {
 
                 const SizedBox(height: 16),
 
-                // Add this in the Column children, after the Row with Add Coins and Withdraw buttons
-const SizedBox(height: 16),
-
-// TEST BUTTON - REMOVE IN PRODUCTION
-
-
-
                 // Quick Purchase Options
                 const Text(
                   'Quick Purchase:',
@@ -428,17 +544,9 @@ const SizedBox(height: 16),
 
                 const SizedBox(height: 32),
 
-                // Transaction History
-                const Text(
-                  'Transaction History',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-
-                const SizedBox(height: 16),
-
-                // FIX 4: Remove the duplicate declarations that were in the build method
-                // and use this Row with refresh button
+                // Transaction History Header with Refresh
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     const Text(
                       'Transaction History',
@@ -454,7 +562,7 @@ const SizedBox(height: 16),
 
                 const SizedBox(height: 16),
 
-                // Transaction List - USING FutureBuilder
+                // Transaction List
                 FutureBuilder<List<Map<String, dynamic>>>(
                   future: _transactionsFuture,
                   builder: (context, snapshot) {
@@ -518,7 +626,6 @@ const SizedBox(height: 16),
     final amountController = TextEditingController();
     final accountNumberController = TextEditingController();
     final accountNameController = TextEditingController();
-    final bankController = TextEditingController();
     
     String? selectedBank;
 
@@ -535,7 +642,6 @@ const SizedBox(height: 16),
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Balance Info
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -562,14 +668,12 @@ const SizedBox(height: 16),
                     
                     const SizedBox(height: 16),
                     
-                    // Amount Field
                     TextFormField(
                       controller: amountController,
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
                         labelText: 'Amount to Withdraw (Coins)',
                         border: OutlineInputBorder(),
-                        prefixText: '',
                         suffixText: 'coins',
                       ),
                       validator: (value) {
@@ -595,7 +699,6 @@ const SizedBox(height: 16),
                     
                     const SizedBox(height: 16),
                     
-                    // Account Number
                     TextFormField(
                       controller: accountNumberController,
                       keyboardType: TextInputType.number,
@@ -620,7 +723,6 @@ const SizedBox(height: 16),
                     
                     const SizedBox(height: 16),
                     
-                    // Bank Selection
                     DropdownButtonFormField<String>(
                       value: selectedBank,
                       decoration: const InputDecoration(
@@ -648,7 +750,6 @@ const SizedBox(height: 16),
                     
                     const SizedBox(height: 16),
                     
-                    // Account Name
                     TextFormField(
                       controller: accountNameController,
                       decoration: const InputDecoration(
@@ -666,7 +767,6 @@ const SizedBox(height: 16),
                     
                     const SizedBox(height: 20),
                     
-                    // Terms and Conditions
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -773,25 +873,22 @@ const SizedBox(height: 16),
         final data = json.decode(response.body);
         
         if (data['success'] == true) {
-          // Deduct coins from user's balance
+          // Deduct coins from user's balance (only call once!)
           await databaseService.processWithdrawal(userId, amount.toInt());
           
           // Add transaction record
           await databaseService.addTransaction(
-              userId: userId,
-              type: 'withdrawal',
-              amount: -amount.toInt(), // This is already negative
-              description: 'Withdrawal request - ${bank.substring(0, 3)}...${accountNumber.substring(accountNumber.length - 4)}',
-            );
-
-          await databaseService.processWithdrawal(userId, amount.toInt());
+            userId: userId,
+            type: 'withdrawal',
+            amount: -amount.toInt(),
+            description: 'Withdrawal request - ${bank.substring(0, 3)}...${accountNumber.substring(accountNumber.length - 4)}',
+          );
           
           // Refresh user data
           if (mounted) {
             final userCubit = context.read<UserCubit>();
             userCubit.refreshUserData();
             
-            // Update local state
             setState(() {
               _hasPendingWithdrawal = true;
             });
@@ -844,11 +941,6 @@ const SizedBox(height: 16),
     ];
   }
 
-  // ... [Keep all other existing methods unchanged - _buildQuickPurchaseOption, _buildTransactionItem, 
-  // _showAddCoinsDialog, _processPayment, _openPaystackPaymentWebView, 
-  // _verifyAndUpdatePayment, _processQuickPurchase, _showTransactionHistory]
-  // ... [All deposit-related methods remain exactly as they were]
-
   Widget _buildQuickPurchaseOption(int coins, String price, BuildContext context, String userEmail) {
     return GestureDetector(
       onTap: () => _processQuickPurchase(coins, price, context, userEmail),
@@ -892,97 +984,104 @@ const SizedBox(height: 16),
   }
 
   Widget _buildTransactionItem(Map<String, dynamic> transaction) {
-  final type = transaction['type'] as String;
-  final amount = transaction['amount'] as int;
-  final description = transaction['description'] as String;
-  final timestamp = transaction['timestamp'];
+    final type = transaction['type'] as String;
+    final amount = transaction['amount'] as int;
+    final description = transaction['description'] as String;
+    final timestamp = transaction['timestamp'];
 
-  IconData icon;
-  Color iconColor;
-  String displayAmount;
+    IconData icon;
+    Color iconColor;
+    String displayAmount;
 
-  switch (type) {
-    case 'win':
-      icon = Icons.emoji_events;
-      iconColor = AppColors.success;
-      displayAmount = '+$amount'; // Positive
-      break;
-    case 'loss':
-      icon = Icons.close;
-      iconColor = AppColors.error;
-      displayAmount = '-${amount.abs()}'; // Negative
-      break;
-    case 'purchase':
-      icon = Icons.shopping_cart;
-      iconColor = AppColors.warning;
-      displayAmount = '+$amount'; // Positive (deposit)
-      break;
-    case 'withdrawal':
-      icon = Icons.money_off;
-      iconColor = AppColors.error;
-      displayAmount = '-${amount.abs()}'; // Negative
-      break;
-    default:
-      icon = Icons.account_balance_wallet;
-      iconColor = AppColors.primaryRed;
-      displayAmount = '$amount';
-  }
+    switch (type) {
+      case 'win':
+        icon = Icons.emoji_events;
+        iconColor = AppColors.success;
+        displayAmount = '+$amount';
+        break;
+      case 'loss':
+        icon = Icons.close;
+        iconColor = AppColors.error;
+        displayAmount = '-${amount.abs()}';
+        break;
+      case 'purchase':
+        icon = Icons.shopping_cart;
+        iconColor = AppColors.warning;
+        displayAmount = '+$amount';
+        break;
+      case 'withdrawal':
+        icon = Icons.money_off;
+        iconColor = AppColors.error;
+        displayAmount = '-${amount.abs()}';
+        break;
+      default:
+        icon = Icons.account_balance_wallet;
+        iconColor = AppColors.primaryRed;
+        displayAmount = '$amount';
+    }
 
-  return Container(
-    margin: const EdgeInsets.only(bottom: 12),
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: AppColors.white,
-      borderRadius: BorderRadius.circular(12),
-      boxShadow: [
-        BoxShadow(
-          color: AppColors.black.withOpacity(0.05),
-          blurRadius: 10,
-          offset: const Offset(0, 2),
-        ),
-      ],
-    ),
-    child: Row(
-      children: [
-        // ... icon container
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                description,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                timestamp != null
-                    ? DateFormat('MMM dd, yyyy HH:mm').format(timestamp.toDate())
-                    : 'N/A',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AppColors.textSecondary,
-                ),
-              ),
-            ],
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
           ),
-        ),
-        Text(
-          displayAmount, // Use displayAmount instead of raw amount
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: type == 'withdrawal' || type == 'loss' 
-                ? AppColors.error 
-                : AppColors.success,
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: iconColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: iconColor, size: 24),
           ),
-        ),
-      ],
-    ),
-  );
-
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  description,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  timestamp != null
+                      ? DateFormat('MMM dd, yyyy HH:mm').format(timestamp.toDate())
+                      : 'N/A',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            displayAmount,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: type == 'withdrawal' || type == 'loss' 
+                  ? AppColors.error 
+                  : AppColors.success,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showAddCoinsDialog(BuildContext context, String userId, String userEmail) {
@@ -1074,9 +1173,7 @@ const SizedBox(height: 16),
 
     try {
       final amountInKobo = amountInNaira * 100;
-      String paymentEmail = "davidohiwerei8@gmail.com"; // Your game's email
       
-      // Initialize Paystack payment
       final result = await paystackService.initializePayment(
         email: userEmail,
         amountInKobo: amountInKobo,
@@ -1084,13 +1181,13 @@ const SizedBox(height: 16),
       );
 
       if (result['success'] == true && result['authorizationUrl'] != null) {
-        // Open Paystack payment page with WebView
         await _openPaystackPaymentWebView(
           context: context,
           authorizationUrl: result['authorizationUrl']!,
           reference: result['reference']!,
           userId: userId,
           amountInNaira: amountInNaira,
+          userEmail: userEmail,
         );
       } else {
         if (!mounted) return;
@@ -1114,6 +1211,7 @@ const SizedBox(height: 16),
     required String reference,
     required String userId,
     required int amountInNaira,
+    required String userEmail,
   }) async {
     final result = await Navigator.push<bool>(
       context,
@@ -1130,59 +1228,18 @@ const SizedBox(height: 16),
     if (!mounted) return;
 
     if (result == true) {
-      // Payment was successful
+      // Payment completed in WebView
       await _verifyAndUpdatePayment(userId, reference, amountInNaira);
-    } else if (result == false) {
-      // Payment was cancelled or failed
+    } else if (result == null) {
+      // WebView closed (possibly bank transfer)
+      // Save as pending payment
+      await _savePendingPayment(reference, amountInNaira);
+      ToastUtils.showInfo(context, 'Payment saved. If you completed a bank transfer, your coins will be added once payment is verified.');
+    } else {
+      // Payment cancelled
       ToastUtils.showInfo(context, 'Payment cancelled');
     }
   }
-
-  // Add this method to add test winnings
-Future<void> _addTestWinnings(BuildContext context) async {
-  if (userId == null) return;
-  
-  setState(() {
-    _isProcessing = true;
-  });
-  
-  try {
-    const testCoins = 5000;
-    
-    // Update user's coins (this is now the withdrawable amount)
-    await FirebaseFirestore.instance
-      .collection('users')
-      .doc(userId!)
-      .update({
-        'coins': FieldValue.increment(testCoins),
-      });
-    
-    // Add a "win" transaction
-    await databaseService.addTransaction(
-      userId: userId!,
-      type: 'win',
-      amount: testCoins,
-      description: 'Test coins added',
-    );
-    
-    // Refresh user data
-    final userCubit = context.read<UserCubit>();
-    userCubit.refreshUserData();
-    
-    // Reload withdrawable balance (which is now total balance)
-    await _loadWithdrawableBalance();
-    
-    ToastUtils.showSuccess(context, 'Added $testCoins test coins! You can now test withdrawal.');
-  } catch (e) {
-    ToastUtils.showError(context, 'Error: $e');
-  } finally {
-    if (mounted) {
-      setState(() {
-        _isProcessing = false;
-      });
-    }
-  }
-}
 
   Future<void> _verifyAndUpdatePayment(
     String userId, 
@@ -1192,36 +1249,47 @@ Future<void> _addTestWinnings(BuildContext context) async {
     if (!mounted) return;
     ToastUtils.showInfo(context, 'Verifying payment...');
     
-    // Verify the payment with Paystack
     final result = await paystackService.verifyTransaction(reference);
 
-if (result['success'] == true && result['status'] == 'success') {
-  // THIS IS WHAT YOU CURRENTLY HAVE:
-  final coins = amountInNaira;
-  
-  // 1. Update coins directly in Firebase
-  await FirebaseFirestore.instance
-    .collection('users')
-    .doc(userId)
-    .update({
-      'totalCoins': FieldValue.increment(coins),
-      'depositCoins': FieldValue.increment(coins),
-    });
-  
-  // 2. Refresh user data in UserCubit
-  if (mounted) {
-    final userCubit = context.read<UserCubit>();
-    userCubit.refreshUserData();
-  }
-  
-  // 3. Add transaction
-  await databaseService.addTransaction(
-    userId: userId,
-    type: 'purchase',
-    amount: coins,
-    description: 'Coin purchase - Ref: ${reference.substring(0, 8)}...',
-  );
-}
+    if (result['success'] == true && result['status'] == 'success') {
+      final coins = amountInNaira;
+      
+      await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .update({
+          'totalCoins': FieldValue.increment(coins),
+          'depositCoins': FieldValue.increment(coins),
+        });
+      
+      if (mounted) {
+        final userCubit = context.read<UserCubit>();
+        userCubit.refreshUserData();
+      }
+      
+      await databaseService.addTransaction(
+        userId: userId,
+        type: 'purchase',
+        amount: coins,
+        description: 'Coin purchase - Ref: ${reference.substring(0, 8)}...',
+      );
+      
+      _refreshTransactions();
+      
+      if (mounted) {
+        ToastUtils.showSuccess(context, 'Payment successful! $coins coins added to your account.');
+      }
+    } else if (result['status'] == 'pending') {
+      // Payment is pending (bank transfer)
+      await _savePendingPayment(reference, amountInNaira);
+      if (mounted) {
+        ToastUtils.showInfo(context, 'Payment is pending verification. Your coins will be added once payment is confirmed.');
+      }
+    } else {
+      if (mounted) {
+        ToastUtils.showError(context, 'Payment verification failed');
+      }
+    }
   }
 
   Future<void> _processQuickPurchase(
@@ -1235,7 +1303,7 @@ if (result['success'] == true && result['status'] == 'success') {
     final priceText = price.replaceAll('₦', '').replaceAll(',', '');
     final amount = int.tryParse(priceText) ?? 0;
     
-    await _processPayment(context, userId!, "davidohiwerei8@gmail.com", amount);
+    await _processPayment(context, userId!, userEmail, amount);
   }
 
   void _showTransactionHistory(BuildContext context) {
@@ -1243,10 +1311,6 @@ if (result['success'] == true && result['status'] == 'success') {
   }
 }
 
-// Keep the existing PaystackPaymentScreen class exactly as it was
-// ... [PaystackPaymentScreen class remains unchanged]
-
-// Enhanced Paystack Payment Screen with proper Android 11+ support
 class PaystackPaymentScreen extends StatefulWidget {
   final String authorizationUrl;
   final String reference;
@@ -1277,7 +1341,6 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
   }
 
   void _initializeWebView() {
-    // Platform-specific parameters for better Android 11+ support
     late final PlatformWebViewControllerCreationParams params;
     
     if (WebViewPlatform.instance is AndroidWebViewPlatform) {
@@ -1335,7 +1398,6 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
         ),
       );
 
-    // Android-specific configuration for better compatibility
     if (_controller.platform is AndroidWebViewController) {
       AndroidWebViewController.enableDebugging(true);
       (_controller.platform as AndroidWebViewController)
@@ -1350,20 +1412,16 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
         );
     }
 
-    // Load the payment URL
     _controller.loadRequest(Uri.parse(widget.authorizationUrl));
   }
 
   void _checkPaymentStatus(String url) {
     print('Current URL: $url');
 
-    // Check for Paystack success/failure patterns
     if (url.contains('checkout.paystack.com/close') || 
         url.contains('standard.paystack.co/close')) {
-      // Payment completed (success or failure)
       _handlePaymentComplete();
     } else if (url.contains('trxref=') || url.contains('reference=')) {
-      // Transaction reference found - likely successful
       _handlePaymentComplete();
     } else if (url.contains('cancelled=true') || url.contains('cancel')) {
       _handlePaymentCancelled();
@@ -1372,13 +1430,11 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
 
   void _handlePaymentComplete() {
     if (!mounted) return;
-    // Return true to indicate payment completion
     Navigator.of(context).pop(true);
   }
 
   void _handlePaymentCancelled() {
     if (!mounted) return;
-    // Return false to indicate cancellation
     Navigator.of(context).pop(false);
   }
 
@@ -1386,27 +1442,28 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
   Widget build(BuildContext context) {
     return WillPopScope(
       onWillPop: () async {
-        // Confirm if user wants to cancel payment
         final shouldPop = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('Cancel Payment?'),
-            content: const Text('Are you sure you want to cancel this payment?'),
+            title: const Text('Close Payment?'),
+            content: const Text(
+              'If you\'re using bank transfer, your payment will be verified automatically within a few minutes.\n\nAre you sure you want to close?'
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
-                child: const Text('No'),
+                child: const Text('Continue Payment'),
               ),
               TextButton(
                 onPressed: () => Navigator.pop(context, true),
-                child: const Text('Yes'),
+                child: const Text('Close'),
               ),
             ],
           ),
         );
         
         if (shouldPop == true) {
-          Navigator.of(context).pop(false);
+          Navigator.of(context).pop(null); // null means user closed manually
         }
         return false;
       },
@@ -1420,23 +1477,25 @@ class _PaystackPaymentScreenState extends State<PaystackPaymentScreen> {
               final shouldClose = await showDialog<bool>(
                 context: context,
                 builder: (context) => AlertDialog(
-                  title: const Text('Cancel Payment?'),
-                  content: const Text('Are you sure you want to cancel this payment?'),
+                  title: const Text('Close Payment?'),
+                  content: const Text(
+                    'If you\'re using bank transfer, your payment will be verified automatically within a few minutes.\n\nAre you sure you want to close?'
+                  ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(context, false),
-                      child: const Text('No'),
+                      child: const Text('Continue Payment'),
                     ),
                     TextButton(
                       onPressed: () => Navigator.pop(context, true),
-                      child: const Text('Yes'),
+                      child: const Text('Close'),
                     ),
                   ],
                 ),
               );
               
               if (shouldClose == true && mounted) {
-                Navigator.of(context).pop(false);
+                Navigator.of(context).pop(null);
               }
             },
           ),
